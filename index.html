@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0F1523">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>H10 Logger</title>
+<style>
+  :root { box-sizing: border-box; color-scheme: dark; }
+  * { box-sizing: inherit; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: #0F1523; color: #E8ECF5;
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: calc(10px + env(safe-area-inset-top, 0px)) 12px calc(14px + env(safe-area-inset-bottom, 0px));
+    -webkit-user-select: none; user-select: none;
+  }
+  h1 { font-size: 18px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: baseline; }
+  h1 .sub { font-weight: 400; }
+  .card { background: #171F31; border-radius: 12px; padding: 11px 12px; margin-bottom: 9px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .big { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .unit { font-size: 14px; color: #96A2BC; font-weight: 400; }
+  .sub { font-size: 12.5px; color: #96A2BC; font-variant-numeric: tabular-nums; }
+  .streams { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px; align-items: center; margin-top: 6px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: #55607A; display: inline-block; }
+  .dot.ok { background: #4CD07A; } .dot.wait { background: #E8C35B; } .dot.bad { background: #E86A5B; }
+  .sname { font-size: 14px; } .srate { font-size: 13px; color: #C3CCE0; font-variant-numeric: tabular-nums; text-align: right; }
+  #alarm { display: none; background: #E86A5B; color: #0F1523; font-weight: 700; border-radius: 12px;
+           padding: 12px; margin-bottom: 9px; text-align: center; }
+  #alarm.on { display: block; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .55; } }
+  button { font: inherit; font-weight: 600; color: #0F1523; background: #6EA8FF;
+           border: 0; border-radius: 10px; padding: 11px 12px; min-height: 46px; }
+  button.ghost { background: #26314A; color: #E8ECF5; }
+  button.warn  { background: #E86A5B; color: #0F1523; }
+  button.mark  { background: #E8C35B; }
+  button:disabled { opacity: .42; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .wide { grid-column: 1 / -1; }
+  select { font: inherit; background: #26314A; color: #E8ECF5; border: 0; border-radius: 8px; padding: 7px 8px; }
+  #sessions .srow { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0;
+                    border-top: 1px solid #26314A; font-size: 13px; }
+  #sessions .srow:first-child { border-top: 0; }
+  #sessions button { min-height: 36px; padding: 6px 10px; font-size: 13px; }
+  #log { font-size: 11.5px; color: #8592AE; white-space: pre-wrap; word-break: break-word; max-height: 24vh; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>H10 Logger <span class="sub" id="clock">00:00:00</span></h1>
+
+<div id="alarm">STREAM STOPPED</div>
+
+<div class="card">
+  <div class="row">
+    <div class="sub" id="devName">not connected</div>
+    <div class="sub" id="battery"></div>
+  </div>
+  <div class="big"><span id="vHR">--</span><span class="unit"> bpm</span></div>
+  <div class="streams">
+    <span class="dot" id="dRR"></span><span class="sname">RR</span><span class="srate" id="rRR">–</span>
+    <span class="dot" id="dECG"></span><span class="sname">ECG 130 Hz</span><span class="srate" id="rECG">–</span>
+    <span class="dot" id="dACC"></span><span class="sname">ACC <span id="accLabel">200</span> Hz</span><span class="srate" id="rACC">–</span>
+  </div>
+</div>
+
+<div class="card grid">
+  <div class="row wide">
+    <span class="sub">ACC rate (set before connecting)</span>
+    <select id="accRate">
+      <option value="25">25 Hz</option><option value="50">50 Hz</option>
+      <option value="100">100 Hz</option><option value="200" selected>200 Hz</option>
+    </select>
+  </div>
+  <button id="bConn" class="wide">Connect H10 and record</button>
+  <button id="bMark" class="mark wide" disabled>Marker start</button>
+  <button id="bStop" class="ghost wide" disabled>Stop recording</button>
+</div>
+
+<div class="card">
+  <div class="sub" style="margin-bottom:4px">Saved recordings (kept on this phone until deleted)</div>
+  <div id="sessions"><div class="sub">none</div></div>
+</div>
+
+<div class="card"><div id="log">Ready. Keep this screen on and Chrome in front while recording.</div></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------------- Polar Measurement Data (PMD) service ----------------
+  const PMD_SVC  = 'fb005c80-02e7-f387-1cad-8acd2d8df0c8';
+  const PMD_CTRL = 'fb005c81-02e7-f387-1cad-8acd2d8df0c8';
+  const PMD_DATA = 'fb005c82-02e7-f387-1cad-8acd2d8df0c8';
+  const ECG = 0x00, ACC = 0x02;
+  const PMD_ERR = ['success', 'invalid op code', 'invalid measurement type', 'not supported', 'invalid length',
+    'invalid parameter', 'already in state', 'invalid resolution', 'invalid sample rate', 'invalid range',
+    'invalid MTU', 'invalid number of channels', 'invalid state', 'device in charger'];
+  const STALL_MS = 5000;          // a requested stream silent this long = alarm + restart
+  const FIRST_DATA_MS = 8000;     // grace after a start request
+  const FLUSH_MS = 4000;          // rows are written to IndexedDB this often
+
+  const $ = id => document.getElementById(id);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const log = m => { const el = $('log'); el.textContent = new Date().toLocaleTimeString() + '  ' + m + '\n' + el.textContent; rec && rec.events.push(phoneTs(Date.now()) + '  ' + m); };
+
+  // Polar Sensor Logger's phone timestamp: local time, ms, no zone
+  const p2 = n => String(n).padStart(2, '0'), p3 = n => String(n).padStart(3, '0');
+  const phoneTs = ms => { const d = new Date(ms);
+    return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(d.getMilliseconds())}`; };
+  const fileTs = ms => { const d = new Date(ms);
+    return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`; };
+
+  // ---------------- IndexedDB: every row is persisted, so a crash or reload loses at most FLUSH_MS ----------------
+  let db;
+  const idb = () => new Promise((res, rej) => {
+    const r = indexedDB.open('h10-logger', 1);
+    r.onupgradeneeded = () => { const d = r.result;
+      d.createObjectStore('sessions', { keyPath: 'sid' });
+      d.createObjectStore('chunks', { autoIncrement: true }).createIndex('sid', 'sid'); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const tx = (stores, mode, fn) => new Promise((res, rej) => {
+    const t = db.transaction(stores, mode); const out = fn(t); t.oncomplete = () => res(out); t.onerror = () => rej(t.error);
+  });
+  const reqP = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+
+  // ---------------- recording state ----------------
+  const HEAD = {
+    HR: 'Phone timestamp;HR [bpm];HRV [ms];Breathing interval [rpm];',
+    RR: 'Phone timestamp;RR-interval [ms]',
+    ECG: 'Phone timestamp;sensor timestamp [ns];timestamp [ms];ecg [uV]',
+    ACC: 'Phone timestamp;sensor timestamp [ns];X [mg];Y [mg];Z [mg]',
+    MARKER: 'Phone timestamp;Marker start/stop'
+  };
+  let rec = null;      // current recording
+  let dev = null, server = null, ctrl = null, dataCh = null, hrCh = null;
+  let userStop = false, wakeLock = null, audio = null, ctrlWaiters = [];
+
+  function newRec(name) {
+    const t = Date.now(), id = (name.match(/([0-9A-F]{8})\s*$/i) || [, 'unknown'])[1];
+    return { sid: fileTs(t), devId: id, devName: name, t0: t, accRate: +$('accRate').value,
+      buf: { HR: [], RR: [], ECG: [], ACC: [], MARKER: [] }, n: { HR: 0, RR: 0, ECG: 0, ACC: 0, MARKER: 0 },
+      first: {}, last: { ECG: null, ACC: null }, ecg0: null, arrivals: { RR: [], ECG: [], ACC: [] },
+      want: { ECG: true, ACC: true }, started: {}, lastData: {}, lastRestart: {}, stalls: { ECG: 0, ACC: 0, RR: 0 },
+      events: [], markerOn: false };
+  }
+  function push(stream, line, nSamples = 1) {
+    const now = Date.now();
+    rec.buf[stream].push(line); rec.n[stream] += nSamples;
+    if (!rec.first[stream]) rec.first[stream] = now;
+    if (rec.arrivals[stream]) { rec.arrivals[stream].push([now, nSamples]); rec.lastData[stream] = now; }
+  }
+  async function flush() {
+    if (!rec) return;
+    const parts = Object.entries(rec.buf).filter(([, v]) => v.length);
+    if (!parts.length && !rec.events.length) return;
+    const meta = { sid: rec.sid, devId: rec.devId, devName: rec.devName, t0: rec.t0, accRate: rec.accRate,
+      n: rec.n, first: rec.first, stalls: rec.stalls, events: rec.events.slice(-400), ended: rec.ended || null };
+    const chunks = parts.map(([k, v]) => ({ sid: rec.sid, stream: k, text: v.join('\n') + '\n' }));
+    parts.forEach(([k]) => { rec.buf[k] = []; });
+    try {
+      await tx(['sessions', 'chunks'], 'readwrite', t => {
+        t.objectStore('sessions').put(meta); chunks.forEach(c => t.objectStore('chunks').add(c)); });
+    } catch (e) { log('STORAGE ERROR: ' + e.message); alarm('STORAGE ERROR'); }
+  }
+
+  // ---------------- PMD parsing ----------------
+  const tsOf = b => { let v = 0n; for (let i = 8; i >= 1; i--) v = (v << 8n) | BigInt(b[i]); return v; };
+  const signed = (v, bits) => (v & (1 << (bits - 1))) ? v - (1 << bits) : v;
+
+  // Delta-compressed frame as in Polar's SDK: reference sample per channel, then blocks of
+  // [delta bit width (1 byte), sample count (1 byte), bit-packed deltas]; every block starts on a byte boundary.
+  function deltaFrame(b, off, channels, refBytes) {
+    const ref = [], out = [];
+    for (let c = 0; c < channels; c++) {
+      let v = 0; for (let k = 0; k < refBytes; k++) v |= b[off + k] << (8 * k);
+      ref.push(signed(v, 8 * refBytes)); off += refBytes; out.push([ref[c]]);
+    }
+    while (off + 2 <= b.length) {
+      const w = b[off], n = b[off + 1]; off += 2;
+      if (!w || !n) break;
+      const nBytes = Math.ceil(w * n * channels / 8);
+      if (off + nBytes > b.length) break;
+      let bit = off * 8;
+      for (let s = 0; s < n; s++) for (let c = 0; c < channels; c++) {
+        let d = 0; for (let i = 0; i < w; i++, bit++) d |= ((b[bit >> 3] >> (bit & 7)) & 1) << i;
+        ref[c] += signed(d, w); out[c].push(ref[c]);
+      }
+      off += nBytes;
+    }
+    return out;
+  }
+
+  // Per-sample sensor time: the frame timestamp is that of its LAST sample; spacing comes from the previous frame's
+  // timestamp (the strap's own clock, ~130.24 Hz for ECG) unless that is missing or off by > 20% from nominal.
+  function sampleTimes(last, T, n, nominalNs) {
+    let dt = BigInt(Math.round(nominalNs));
+    if (last !== null) { const d = (T - last) / BigInt(n); if (d > dt * 8n / 10n && d < dt * 12n / 10n) dt = d; }
+    const out = []; for (let i = 0; i < n; i++) out.push(T - BigInt(n - 1 - i) * dt); return out;
+  }
+
+  function onPmd(ev) {
+    if (!rec) return;
+    const v = ev.target.value, b = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if (b.length < 10) return;
+    const type = b[0], T = tsOf(b), ft = b[9], host = Date.now();
+    if (type === ECG && ft === 0x00) {
+      const n = Math.floor((b.length - 10) / 3); if (!n) return;
+      const ts = sampleTimes(rec.last.ECG, T, n, 1e9 / 130); rec.last.ECG = T;
+      if (rec.ecg0 === null) rec.ecg0 = ts[0];
+      const lines = [];
+      for (let i = 0; i < n; i++) {
+        const o = 10 + 3 * i, uv = signed(b[o] | (b[o + 1] << 8) | (b[o + 2] << 16), 24);
+        const ph = host - Number((T - ts[i]) / 1000000n);
+        lines.push(`${phoneTs(ph)};${ts[i]};${(Number(ts[i] - rec.ecg0) / 1e6).toFixed(6)};${uv}`);
+      }
+      push('ECG', lines.join('\n'), n);
+    } else if (type === ACC) {
+      const comp = (ft & 0x80) !== 0, base = ft & 0x7F, bytes = base + 1;   // 0: 8-bit, 1: 16-bit, 2: 24-bit
+      let ch;
+      if (comp) ch = deltaFrame(b, 10, 3, bytes);
+      else {
+        const n = Math.floor((b.length - 10) / (3 * bytes)); ch = [[], [], []];
+        for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) {
+          const o = 10 + (i * 3 + c) * bytes; let x = 0; for (let k = 0; k < bytes; k++) x |= b[o + k] << (8 * k);
+          ch[c].push(signed(x, 8 * bytes));
+        }
+      }
+      const n = ch[0].length; if (!n) return;
+      const ts = sampleTimes(rec.last.ACC, T, n, 1e9 / rec.accRate); rec.last.ACC = T;
+      const lines = [];
+      for (let i = 0; i < n; i++) {
+        const ph = host - Number((T - ts[i]) / 1000000n);
+        lines.push(`${phoneTs(ph)};${ts[i]};${ch[0][i]};${ch[1][i]};${ch[2][i]}`);
+      }
+      push('ACC', lines.join('\n'), n);
+    }
+  }
+
+  function onCtrl(ev) {
+    const v = ev.target.value, b = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if (b[0] !== 0xF0) return;
+    const w = ctrlWaiters.find(x => x.op === b[1] && x.type === b[2]);
+    if (w) { ctrlWaiters = ctrlWaiters.filter(x => x !== w); w.res(b[3]); }
+  }
+  async function ctrlCmd(bytes) {
+    const p = new Promise(res => { const w = { op: bytes[0], type: bytes[1], res };
+      ctrlWaiters.push(w); setTimeout(() => { if (ctrlWaiters.includes(w)) { ctrlWaiters = ctrlWaiters.filter(x => x !== w); res(-1); } }, 4000); });
+    await ctrl.writeValueWithResponse(new Uint8Array(bytes));
+    return p;
+  }
+  const START = {
+    ECG: () => [0x02, ECG, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00],
+    ACC: () => { const r = rec.accRate; return [0x02, ACC, 0x00, 0x01, r & 0xFF, r >> 8, 0x01, 0x01, 0x10, 0x00, 0x02, 0x01, 0x08, 0x00]; }
+  };
+  async function startStream(k, why) {
+    rec.lastRestart[k] = Date.now();
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let code;
+      try { code = await ctrlCmd(START[k]()); } catch (e) { code = 'write failed: ' + e.message; }
+      const txt = typeof code === 'number' ? (code < 0 ? 'no response' : PMD_ERR[code] || 'error ' + code) : code;
+      log(`${k} start${why ? ' (' + why + ')' : ''}, try ${attempt}: ${txt}`);
+      if (code === 0 || code === 6) { rec.started[k] = Date.now(); return true; }
+      if (code === 12 || code === 13) await sleep(1500);   // invalid state / in charger: wait longer
+      if (attempt < 3) {
+        try { await ctrlCmd([0x03, k === 'ECG' ? ECG : ACC]); } catch (e) {}
+        await sleep(1200);
+      }
+    }
+    return false;
+  }
+
+  // ---------------- connection ----------------
+  async function connectGatt() {
+    server = await dev.gatt.connect();
+    log('Connected: ' + dev.name);
+    $('devName').textContent = dev.name;
+    hrCh = await (await server.getPrimaryService('heart_rate')).getCharacteristic('heart_rate_measurement');
+    hrCh.addEventListener('characteristicvaluechanged', onHR);
+    await hrCh.startNotifications();
+    try {
+      const bat = await (await server.getPrimaryService('battery_service')).getCharacteristic('battery_level');
+      $('battery').textContent = 'battery ' + (await bat.readValue()).getUint8(0) + '%';
+    } catch (e) {}
+    const pmd = await server.getPrimaryService(PMD_SVC);
+    ctrl = await pmd.getCharacteristic(PMD_CTRL); dataCh = await pmd.getCharacteristic(PMD_DATA);
+    ctrl.addEventListener('characteristicvaluechanged', onCtrl);
+    await ctrl.startNotifications();
+    dataCh.addEventListener('characteristicvaluechanged', onPmd);
+    await dataCh.startNotifications();
+    try {
+      const f = new Uint8Array((await ctrl.readValue()).buffer);
+      const has = f[0] === 0x0F ? { ECG: !!(f[1] & 1), ACC: !!(f[1] & 4) } : null;
+      log('Strap reports streams: ' + (has ? `ECG ${has.ECG ? 'yes' : 'NO'}, ACC ${has.ACC ? 'yes' : 'NO'}` : 'unknown'));
+      if (has && (!has.ECG || !has.ACC)) { alarm('STRAP OFFERS NO ECG/ACC'); log('Is another app or watch connected to the strap? Close it, or reset the strap (unsnap 30 s).'); }
+    } catch (e) { log('Could not read stream list: ' + e.message); }
+    await sleep(600);
+    for (const k of ['ECG', 'ACC']) { await startStream(k); await sleep(400); }
+  }
+  async function reconnectLoop() {
+    let wait = 2000;
+    while (rec && !userStop && !(dev.gatt && dev.gatt.connected)) {
+      log(`Reconnecting in ${wait / 1000} s ...`); await sleep(wait);
+      if (userStop || !rec) return;
+      try { rec.last = { ECG: null, ACC: null }; await connectGatt(); log('Reconnected; streams restarted.'); return; }
+      catch (e) { log('Reconnect failed: ' + e.message); wait = Math.min(wait * 2, 15000); }
+    }
+  }
+
+  function onHR(e) {
+    if (!rec) return;
+    const dv = e.target.value, flags = dv.getUint8(0); let i = 1, hr;
+    if (flags & 0x01) { hr = dv.getUint16(i, true); i += 2; } else { hr = dv.getUint8(i); i += 1; }
+    if (flags & 0x08) i += 2;
+    const host = Date.now(), rr = [];
+    if (flags & 0x10) for (; i + 1 < dv.byteLength; i += 2) rr.push(dv.getUint16(i, true) * 1000 / 1024);
+    push('HR', `${phoneTs(host)};${hr}`);
+    let back = rr.reduce((a, b) => a + b, 0);
+    for (const v of rr) { back -= v; push('RR', `${phoneTs(host - back)};${v.toFixed(4)}`); }   // last interval ends at arrival
+    $('vHR').textContent = hr;
+  }
+
+  // ---------------- watchdog: live rates, alarm, automatic restart ----------------
+  function alarm(msg) {
+    $('alarm').textContent = msg; $('alarm').classList.add('on');
+    if (navigator.vibrate) navigator.vibrate([300, 150, 300]);
+    try { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = 880; g.gain.value = 0.25;
+          o.connect(g).connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.5); } catch (e) {}
+  }
+  setInterval(() => {
+    if (!rec) return;
+    const now = Date.now(), s = Math.floor((now - rec.t0) / 1000);
+    $('clock').textContent = `${p2(Math.floor(s / 3600))}:${p2(Math.floor(s / 60) % 60)}:${p2(s % 60)}`;
+    const nominal = { RR: null, ECG: 130.2, ACC: rec.accRate };
+    const problems = [];
+    for (const k of ['RR', 'ECG', 'ACC']) {
+      const a = rec.arrivals[k]; while (a.length && a[0][0] < now - 10000) a.shift();
+      const rate = a.reduce((x, y) => x + y[1], 0) / 10;
+      const connected = dev && dev.gatt && dev.gatt.connected;
+      const since = rec.lastData[k] ? now - rec.lastData[k] : null;
+      let state;
+      if (!connected) state = 'bad';
+      else if (k === 'RR') state = since !== null && since < STALL_MS ? 'ok' : (now - rec.t0 < FIRST_DATA_MS ? 'wait' : 'bad');
+      else if (since !== null && since < STALL_MS) state = Math.abs(rate - nominal[k]) < 0.1 * nominal[k] ? 'ok' : 'wait';
+      else if (rec.started[k] && now - rec.started[k] < FIRST_DATA_MS) state = 'wait';
+      else state = 'bad';
+      $('d' + k).className = 'dot ' + state;
+      $('r' + k).textContent = k === 'RR' ? `${rec.n.RR} beats` : `${rate.toFixed(1)} Hz · ${rec.n[k].toLocaleString()}`;
+      if (state === 'bad') problems.push(k);
+      if (state === 'bad' && connected && k !== 'RR' && now - (rec.lastRestart[k] || 0) > 10000) {
+        rec.stalls[k]++; startStream(k, since === null ? 'no data yet' : `silent ${Math.round(since / 1000)} s`);
+      }
+    }
+    if (problems.length) alarm(problems.join(' + ') + (dev && dev.gatt && dev.gatt.connected ? ' STOPPED — restarting' : ' — STRAP DISCONNECTED'));
+    else $('alarm').classList.remove('on');
+  }, 1000);
+  setInterval(flush, FLUSH_MS);
+
+  // ---------------- buttons ----------------
+  $('accRate').onchange = () => { $('accLabel').textContent = $('accRate').value; };
+  $('bConn').onclick = async () => {
+    if (!navigator.bluetooth) { log('Web Bluetooth unavailable: open this page in Chrome.'); return; }
+    try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    try {
+      dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'Polar H10' }],
+        optionalServices: ['heart_rate', 'battery_service', PMD_SVC] });
+      userStop = false; rec = newRec(dev.name);
+      dev.addEventListener('gattserverdisconnected', () => {
+        if (userStop || !rec) return;
+        log('DISCONNECTED from strap'); alarm('STRAP DISCONNECTED'); reconnectLoop(); });
+      $('bConn').disabled = true; $('accRate').disabled = true; $('bStop').disabled = false; $('bMark').disabled = false;
+      try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+      await connectGatt();
+      await flush(); renderSessions();
+    } catch (e) { log('Connect: ' + e.message); if (rec && !rec.n.RR) { rec = null; $('bConn').disabled = false; $('accRate').disabled = false; } }
+  };
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && rec && !wakeLock) { try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} }
+    if (document.visibilityState === 'hidden' && rec) log('App went to the background: Android may pause Bluetooth.');
+  });
+  $('bMark').onclick = () => {
+    if (!rec) return;
+    rec.markerOn = !rec.markerOn;
+    push('MARKER', `${phoneTs(Date.now())};${rec.markerOn ? 'MARKER_START' : 'MARKER_STOP'} `);
+    $('bMark').textContent = rec.markerOn ? 'Marker stop' : 'Marker start';
+    if (navigator.vibrate) navigator.vibrate(60);
+    log(rec.markerOn ? 'MARKER_START' : 'MARKER_STOP');
+  };
+  $('bStop').onclick = async () => {
+    if (!rec || !confirm('Stop recording?')) return;
+    userStop = true;
+    try { if (dev.gatt.connected) { await ctrlCmd([0x03, ECG]); await ctrlCmd([0x03, ACC]); dev.gatt.disconnect(); } } catch (e) {}
+    log(`Stopped. ECG ${rec.n.ECG}, ACC ${rec.n.ACC}, RR ${rec.n.RR}; restarts ECG ${rec.stalls.ECG}, ACC ${rec.stalls.ACC}.`);
+    rec.ended = Date.now(); await flush(); rec = null;
+    try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null;
+    $('alarm').classList.remove('on'); $('bConn').disabled = false; $('accRate').disabled = false;
+    $('bStop').disabled = true; $('bMark').disabled = true; $('bMark').textContent = 'Marker start';
+    ['RR', 'ECG', 'ACC'].forEach(k => { $('d' + k).className = 'dot'; });
+    renderSessions();
+  };
+
+  // ---------------- saved sessions: download / share / delete ----------------
+  async function filesFor(sid) {
+    const m = await tx(['sessions'], 'readonly', t => reqP(t.objectStore('sessions').get(sid)));
+    const all = await tx(['chunks'], 'readonly', t => reqP(t.objectStore('chunks').index('sid').getAll(sid)));
+    const files = [];
+    for (const k of ['HR', 'RR', 'ECG', 'ACC']) {
+      const parts = all.filter(c => c.stream === k).map(c => c.text); if (!parts.length) continue;
+      const t = m.first && m.first[k] ? m.first[k] : m.t0;
+      files.push(new File([HEAD[k] + '\n', ...parts], `Polar_H10_${m.devId}_${fileTs(t)}_${k}.txt`, { type: 'text/plain' }));
+    }
+    const mk = all.filter(c => c.stream === 'MARKER').map(c => c.text);
+    if (mk.length) files.push(new File([HEAD.MARKER + '\n', ...mk], `MARKER_${fileTs(m.first.MARKER || m.t0)}.txt`, { type: 'text/plain' }));
+    files.push(new File([`H10 Logger session ${m.sid}\ndevice ${m.devName}\nACC ${m.accRate} Hz\nsamples ${JSON.stringify(m.n)}\nstream restarts ${JSON.stringify(m.stalls)}\n\n` + (m.events || []).join('\n') + '\n'],
+      `H10LOG_${m.sid}.txt`, { type: 'text/plain' }));
+    return files;
+  }
+  async function download(sid) {
+    for (const f of await filesFor(sid)) {
+      const a = document.createElement('a'); a.href = URL.createObjectURL(f); a.download = f.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 20000); await sleep(700);
+    }
+    log('Downloaded session ' + sid);
+  }
+  async function share(sid) {
+    const files = await filesFor(sid);
+    if (!navigator.canShare || !navigator.canShare({ files })) { log('Sharing files is not supported here; use Download.'); return; }
+    try { await navigator.share({ files, title: 'H10 ' + sid }); log('Shared session ' + sid); } catch (e) { log('Share: ' + e.message); }
+  }
+  async function del(sid) {
+    if (!confirm('Delete recording ' + sid + ' from this phone? Download or share it first.')) return;
+    await tx(['sessions', 'chunks'], 'readwrite', t => {
+      t.objectStore('sessions').delete(sid);
+      const ix = t.objectStore('chunks').index('sid'); ix.openKeyCursor(IDBKeyRange.only(sid)).onsuccess = e => {
+        const c = e.target.result; if (c) { t.objectStore('chunks').delete(c.primaryKey); c.continue(); } };
+    });
+    renderSessions();
+  }
+  async function renderSessions() {
+    const list = await tx(['sessions'], 'readonly', t => reqP(t.objectStore('sessions').getAll()));
+    const el = $('sessions'); el.innerHTML = '';
+    if (!list.length) { el.innerHTML = '<div class="sub">none</div>'; return; }
+    for (const m of list.sort((a, b) => b.t0 - a.t0)) {
+      const live = rec && rec.sid === m.sid;
+      const mins = ((m.ended || Date.now()) - m.t0) / 60000;
+      const row = document.createElement('div'); row.className = 'srow';
+      row.innerHTML = `<div>${phoneTs(m.t0).slice(0, 16).replace('T', ' ')}<br><span class="sub">${live ? 'recording · ' : ''}${mins.toFixed(0)} min · ECG ${m.n.ECG ? '✓' : '✗'} ACC ${m.n.ACC ? '✓' : '✗'} RR ${m.n.RR}</span></div>`;
+      const btns = document.createElement('div');
+      for (const [lab, fn, cls] of [['Share', share, ''], ['Save', download, 'ghost'], ['Delete', del, 'warn']]) {
+        const b = document.createElement('button'); b.textContent = lab; if (cls) b.className = cls;
+        b.disabled = live; b.onclick = () => fn(m.sid); btns.appendChild(b); btns.append(' ');
+      }
+      row.appendChild(btns); el.appendChild(row);
+    }
+  }
+
+  window.addEventListener('beforeunload', e => { if (rec) { flush(); e.preventDefault(); e.returnValue = ''; } });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  idb().then(d => { db = d; renderSessions(); }).catch(e => log('IndexedDB unavailable: ' + e.message));
+})();
+</script>
+</body>
+</html>
