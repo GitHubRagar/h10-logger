@@ -1,7 +1,9 @@
 {
+  "id": "/h10-logger/",
   "name": "H10 Logger",
   "short_name": "H10 Logger",
-  "start_url": "./index.html",
+  "start_url": "/h10-logger/index.html",
+  "scope": "/h10-logger/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0F1523",
